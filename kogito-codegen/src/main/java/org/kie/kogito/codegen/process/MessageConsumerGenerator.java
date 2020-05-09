@@ -15,6 +15,12 @@
 
 package org.kie.kogito.codegen.process;
 
+import static com.github.javaparser.StaticJavaParser.parse;
+import static org.kie.kogito.codegen.CodegenUtils.interpolateArguments;
+import static org.kie.kogito.codegen.CodegenUtils.interpolateTypes;
+import static org.kie.kogito.codegen.CodegenUtils.isApplicationField;
+import static org.kie.kogito.codegen.CodegenUtils.isProcessField;
+
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
@@ -23,21 +29,18 @@ import com.github.javaparser.ast.expr.MethodCallExpr;
 import com.github.javaparser.ast.expr.ObjectCreationExpr;
 import com.github.javaparser.ast.expr.StringLiteralExpr;
 import com.github.javaparser.ast.type.ClassOrInterfaceType;
+
 import org.drools.core.util.StringUtils;
 import org.jbpm.compiler.canonical.TriggerMetaData;
 import org.kie.api.definition.process.WorkflowProcess;
 import org.kie.kogito.codegen.BodyDeclarationComparator;
+import org.kie.kogito.codegen.GeneratorContext;
 import org.kie.kogito.codegen.di.DependencyInjectionAnnotator;
-
-import static com.github.javaparser.StaticJavaParser.parse;
-import static org.kie.kogito.codegen.CodegenUtils.interpolateArguments;
-import static org.kie.kogito.codegen.CodegenUtils.interpolateTypes;
-import static org.kie.kogito.codegen.CodegenUtils.isApplicationField;
-import static org.kie.kogito.codegen.CodegenUtils.isProcessField;
 
 public class MessageConsumerGenerator {
     private final String relativePath;
 
+    private final GeneratorContext context;
     private WorkflowProcess process;
     private final String packageName;
     private final String resourceClazzName;
@@ -53,12 +56,14 @@ public class MessageConsumerGenerator {
     private TriggerMetaData trigger;
     
     public MessageConsumerGenerator(
+            GeneratorContext context,
             WorkflowProcess process,
             String modelfqcn,
             String processfqcn,
             String appCanonicalName,
             String messageDataEventClassName,
             TriggerMetaData trigger) {
+        this.context = context;
         this.process = process;
         this.trigger = trigger;
         this.packageName = process.getPackageName();
@@ -102,8 +107,10 @@ public class MessageConsumerGenerator {
         
         template.findAll(ClassOrInterfaceType.class).forEach(cls -> interpolateTypes(cls, dataClazzName));
         template.findAll(MethodDeclaration.class).stream().filter(md -> md.getNameAsString().equals("configure")).forEach(md -> md.addAnnotation("javax.annotation.PostConstruct"));
+        
+        String consumeMethodArgumentType = getConsumeMethodArgumentType();
         template.findAll(MethodDeclaration.class).stream().filter(md -> md.getNameAsString().equals("consume")).forEach(md -> { 
-            interpolateArguments(md, "String");
+            interpolateArguments(md, consumeMethodArgumentType);
             md.findAll(StringLiteralExpr.class).forEach(str -> str.setString(str.asString().replace("$Trigger$", trigger.getName())));
             md.findAll(ClassOrInterfaceType.class).forEach(t -> t.setName(t.getNameAsString().replace("$DataEventType$", messageDataEventClassName)));
             md.findAll(ClassOrInterfaceType.class).forEach(t -> t.setName(t.getNameAsString().replace("$DataType$", trigger.getDataType())));
@@ -131,6 +138,18 @@ public class MessageConsumerGenerator {
         }
         template.getMembers().sort(new BodyDeclarationComparator());
         return clazz.toString();
+    }
+
+    private String getConsumeMethodArgumentType() {
+        final String propertyPrefix = "kogito.mp.messaging.incoming.";
+        String propertyName = new StringBuilder(propertyPrefix).append(trigger.getName()).append(".type").toString();
+
+        System.out.println("Retrieving property with name: " + propertyName);
+        //Find the property type if explicitly set. If not, we default to String.
+        //TODO: We could do something a little smarter by inferring the type from combination of the connector, and the deserializer (kafka), or Camel rout (camel).
+        String type = context.getApplicationProperty(propertyName).orElse("String");
+        System.out.println("!!!Using consume method argument type:" + type);
+        return type;
     }
     
     private void initializeProcessField(FieldDeclaration fd, ClassOrInterfaceDeclaration template) {

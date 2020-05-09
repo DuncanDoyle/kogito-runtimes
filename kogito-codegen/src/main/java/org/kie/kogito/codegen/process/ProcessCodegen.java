@@ -366,6 +366,7 @@ public class ProcessCodegen extends AbstractGenerator {
                         mdegs.add(msgDataEventGenerator);
 
                         megs.add(new MessageConsumerGenerator(
+                                context(),
                                 workFlowProcess,
                                 modelClassGenerator.className(),
                                 execModelGen.className(),
