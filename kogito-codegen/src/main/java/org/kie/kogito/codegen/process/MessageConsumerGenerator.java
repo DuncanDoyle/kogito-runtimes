@@ -16,10 +16,13 @@
 package org.kie.kogito.codegen.process;
 
 import static com.github.javaparser.StaticJavaParser.parse;
-import static org.kie.kogito.codegen.CodegenUtils.interpolateArguments;
 import static org.kie.kogito.codegen.CodegenUtils.interpolateTypes;
-import static org.kie.kogito.codegen.CodegenUtils.isApplicationField;
+import static org.kie.kogito.codegen.CodegenUtils.interpolateArguments;
 import static org.kie.kogito.codegen.CodegenUtils.isProcessField;
+import static org.kie.kogito.codegen.CodegenUtils.isApplicationField;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
@@ -97,23 +100,34 @@ public class MessageConsumerGenerator {
     }
     
     public String generate() {
-        CompilationUnit clazz = parse(
-                this.getClass().getResourceAsStream("/class-templates/MessageConsumerTemplate.java"));
+        //TODO: ddoyle: ConnectorType only seems relevant for SmallRye implementations atm ....
+        String smallRyeConnectorType = getConnectorType();
+
+        CompilationUnit clazz = getMessageConsumerTemplate(smallRyeConnectorType);
+        String payloadType = getPayloadType(smallRyeConnectorType);
+
+        List<String> payloadTypeImports = getPayloadTypeImports(smallRyeConnectorType);
+
+
         clazz.setPackageDeclaration(process.getPackageName());
         clazz.addImport(modelfqcn);
+        for (String nextPayloadTypeImport: payloadTypeImports) {
+            clazz.addImport(nextPayloadTypeImport);
+        }
 
         ClassOrInterfaceDeclaration template = clazz.findFirst(ClassOrInterfaceDeclaration.class).get();
-        template.setName(resourceClazzName);        
+        template.setName(resourceClazzName);       
         
         template.findAll(ClassOrInterfaceType.class).forEach(cls -> interpolateTypes(cls, dataClazzName));
         template.findAll(MethodDeclaration.class).stream().filter(md -> md.getNameAsString().equals("configure")).forEach(md -> md.addAnnotation("javax.annotation.PostConstruct"));
         
-        String consumeMethodArgumentType = getConsumeMethodArgumentType();
+        String consumeMethodArgumentType = getConsumeMethodArgumentType(smallRyeConnectorType, payloadType);
         template.findAll(MethodDeclaration.class).stream().filter(md -> md.getNameAsString().equals("consume")).forEach(md -> { 
             interpolateArguments(md, consumeMethodArgumentType);
             md.findAll(StringLiteralExpr.class).forEach(str -> str.setString(str.asString().replace("$Trigger$", trigger.getName())));
             md.findAll(ClassOrInterfaceType.class).forEach(t -> t.setName(t.getNameAsString().replace("$DataEventType$", messageDataEventClassName)));
             md.findAll(ClassOrInterfaceType.class).forEach(t -> t.setName(t.getNameAsString().replace("$DataType$", trigger.getDataType())));
+            md.findAll(ClassOrInterfaceType.class).forEach(t -> t.setName(t.getNameAsString().replace("$PayloadType$", payloadType)));
         });
         template.findAll(MethodCallExpr.class).forEach(this::interpolateStrings);
         
@@ -140,7 +154,64 @@ public class MessageConsumerGenerator {
         return clazz.toString();
     }
 
-    private String getConsumeMethodArgumentType() {
+    private CompilationUnit getMessageConsumerTemplate(String smallRyeConnectorType) {
+        CompilationUnit clazz;
+        
+        switch (smallRyeConnectorType) {
+            //TODO: If we use the SmallRye Kafka connector, we expect StringDeserializer
+            case "smallrye-kafka":
+                clazz = parse(this.getClass().getResourceAsStream("/class-templates/MessageConsumerTemplate.java"));
+                break;
+            default:
+                clazz = parse(this.getClass().getResourceAsStream("/class-templates/GenericMessageConsumerTemplate.java"));
+                break;
+        } 
+        return clazz;
+    }    
+
+    private String getConnectorType() {
+        final String srmConnectorPropertyPrefix = "mp.messaging.incoming.";
+        final String srmConnectorPropertyPostfix = ".connector";
+        final String srmConnectorProperty = new StringBuilder().append(srmConnectorPropertyPrefix).append(trigger.getName()).append(srmConnectorPropertyPostfix).toString();
+        return context.getApplicationProperty(srmConnectorProperty).get();
+    }
+
+    private String getPayloadType(String smallRyeConnectorType) {
+        String payloadType;
+        switch (smallRyeConnectorType) {
+            case "smallrye-kafka":
+                payloadType = "String";
+                break;
+            case "smallrye-camel":
+                //TODO: ddoyle: infer this from the "endpoint-uri" configuration.
+                payloadType = "GenericFile<File>";
+                break;
+            default:
+                payloadType = "String";
+                break;
+        }
+        return payloadType;
+    }
+
+    private List<String> getPayloadTypeImports(String smallRyeConnectorType) {
+        List<String> payloadTypeImports = new ArrayList<>();
+        switch (smallRyeConnectorType) {
+            case "smallrye-kafka":
+                break;
+            case "smallrye-camel":
+                //TODO: ddoyle: infer this from the "endpoint-uri" configuration.
+                payloadTypeImports.add("org.apache.camel.component.file.GenericFile");
+                payloadTypeImports.add("java.io.File");
+                break;
+            default:
+                break;
+        }
+        return payloadTypeImports;
+    }
+ 
+    
+    private String getConsumeMethodArgumentType(String smallRyeConnectorType, String payloadType) {
+        /*
         final String propertyPrefix = "kogito.mp.messaging.incoming.";
         String propertyName = new StringBuilder(propertyPrefix).append(trigger.getName()).append(".type").toString();
 
@@ -150,6 +221,20 @@ public class MessageConsumerGenerator {
         String type = context.getApplicationProperty(propertyName).orElse("String");
         System.out.println("!!!Using consume method argument type:" + type);
         return type;
+        */
+        String consumeMethodArgumentType;
+        switch (smallRyeConnectorType) {
+            case "smallrye-kafka":
+                consumeMethodArgumentType = "String";
+                break;
+            case "smallrye-camel":
+                //consumeMethodArgumentType = new StringBuilder("Message").append("<").append(payloadType).append(">").toString();
+                consumeMethodArgumentType = payloadType;
+            default:
+                consumeMethodArgumentType = payloadType;
+                break;
+        }
+        return consumeMethodArgumentType;
     }
     
     private void initializeProcessField(FieldDeclaration fd, ClassOrInterfaceDeclaration template) {
